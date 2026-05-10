@@ -419,6 +419,33 @@ class TestGetProjectRoot:
         assert get_project_root(_record(pid=7777)) == tmp_path
         assert called == [7777]
 
+    def test_slow_path_writes_back_to_unresolvable_on_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Greptile P1: the slow path must populate ``_UNRESOLVABLE`` on
+        failure so a direct caller (without a prior coordinator run)
+        doesn't re-fire ``psutil.Process(pid).cwd()`` on every render
+        against a dead agent.
+        """
+        calls: list[int] = []
+
+        def failing_resolver(record: AgentRecord) -> None:
+            calls.append(record.pid)
+            return None
+
+        monkeypatch.setattr(blast_radius_module, "_resolve_agent_project_root", failing_resolver)
+
+        from app.agents.blast_radius import get_project_root
+
+        rec = _record(pid=88888)
+        assert get_project_root(rec) is None
+        # First call hit the slow path and added the key to _UNRESOLVABLE.
+        assert "claude-code:88888" in blast_radius_module._UNRESOLVABLE
+        # Second call must short-circuit on the negative cache without
+        # re-invoking the resolver.
+        assert get_project_root(rec) is None
+        assert calls == [88888]
+
 
 @pytest.mark.slow
 class TestE2ESmoke:

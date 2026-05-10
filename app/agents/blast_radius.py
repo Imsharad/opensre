@@ -401,19 +401,17 @@ def get_project_root(record: AgentRecord) -> Path | None:
 
     Public surface for callers (currently the ``/agents inspect`` panel
     header) that want a project root without implicitly re-firing
-    ``psutil.Process(pid).cwd()`` on every call. Fast-path: read from
-    a cached :class:`BlastRadiusWatcher`'s already-resolved
-    ``project_root``. Negative-cache path: short-circuit to ``None``
-    for PIDs already classified unresolvable. Slow path (only on first
-    call before the watcher has started): fresh psutil resolution.
+    ``psutil.Process(pid).cwd()`` on every call. Three paths:
 
-    Crucially, the slow path also consults ``_UNRESOLVABLE`` so a dead
-    agent doesn't re-fire psutil on every render. The earlier
-    ``_project_root_for_inspect`` helper open-coded the watcher lookup
-    and skipped this check, re-running ``Process.cwd()`` against every
-    stale registry entry per ``/agents inspect`` invocation — a
-    regression of the same negative-cache that the coordinator path
-    already had.
+    1. **Fast path:** read ``project_root`` from a cached
+       :class:`BlastRadiusWatcher`.
+    2. **Negative-cache short-circuit:** ``None`` immediately for PIDs
+       already classified unresolvable in ``_UNRESOLVABLE``.
+    3. **Slow path:** fresh ``psutil.Process(pid).cwd()`` resolution.
+       If that returns ``None`` we write the key into ``_UNRESOLVABLE``
+       so the next call short-circuits — without this, a direct caller
+       (the coordinator path is no longer the only entry) would re-fire
+       psutil on every render against a dead agent.
     """
     key = f"{record.name}:{record.pid}"
     with _WATCHERS_LOCK:
@@ -422,7 +420,11 @@ def get_project_root(record: AgentRecord) -> Path | None:
             return cached.project_root
         if key in _UNRESOLVABLE:
             return None
-    return _resolve_agent_project_root(record)
+    root = _resolve_agent_project_root(record)
+    if root is None:
+        with _WATCHERS_LOCK:
+            _UNRESOLVABLE.add(key)
+    return root
 
 
 def _reset_watchers_for_tests() -> None:
